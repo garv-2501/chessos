@@ -1,5 +1,13 @@
-import { useEffect, useMemo, useReducer, useRef, useState } from 'react'
+import {
+  useEffect,
+  useMemo,
+  useReducer,
+  useRef,
+  useState,
+  type ChangeEvent,
+} from 'react'
 import { useNavigate } from 'react-router-dom'
+import { Chess } from 'chess.js'
 import {
   findOpening,
   getPositionBook,
@@ -16,7 +24,11 @@ import {
   squareAt,
   type PlayedMove,
 } from '../chess/game'
+import { buildCaptureSummary } from '../chess/captures'
+import { useStockfish } from '../engine/useStockfish'
 import type { Piece } from '../chess/types'
+import type { PieceType } from '../chess/types'
+import { parseFEN } from '../chess/fen'
 
 const fileLabels = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
 const rankLabels = ['8', '7', '6', '5', '4', '3', '2', '1']
@@ -27,6 +39,11 @@ const SAN_SYMBOLS: Record<string, string> = {
   R: '♖',
   B: '♗',
   N: '♘',
+}
+
+const CAPTURE_SYMBOLS: Record<'w' | 'b', Record<PieceType, string>> = {
+  w: { p: '♙', n: '♘', b: '♗', r: '♖', q: '♕', k: '♔' },
+  b: { p: '♟', n: '♞', b: '♝', r: '♜', q: '♛', k: '♚' },
 }
 
 type DragState = {
@@ -64,6 +81,20 @@ function formatSanWithSymbols(san: string): string {
   return san.replace(/[KQRBN]/g, (symbol) => SAN_SYMBOLS[symbol] ?? symbol)
 }
 
+function renderSanWithEmphasizedSymbols(san: string) {
+  const text = formatSanWithSymbols(san)
+  return text.split(/([♔♕♖♗♘])/g).map((part, index) => {
+    if (/[♔♕♖♗♘]/.test(part)) {
+      return (
+        <span key={`${part}-${index}`} className="san-symbol">
+          {part}
+        </span>
+      )
+    }
+    return <span key={`${part}-${index}`}>{part}</span>
+  })
+}
+
 function buildMoveRows(history: PlayedMove[]): MoveRow[] {
   const rows: MoveRow[] = []
 
@@ -80,6 +111,35 @@ function buildMoveRows(history: PlayedMove[]): MoveRow[] {
   return rows
 }
 
+function buildPlayedMovesFromVerboseHistory(
+  verboseMoves: Array<{
+    from: string
+    to: string
+    san: string
+    color: 'w' | 'b'
+    promotion?: string
+  }>,
+): PlayedMove[] {
+  return verboseMoves.map((move) => ({
+    from: move.from,
+    to: move.to,
+    san: move.san,
+    color: move.color,
+  }))
+}
+
+function renderCapturedPieces(pieces: PieceType[], pieceColor: 'w' | 'b') {
+  if (pieces.length === 0) {
+    return <span className="captures-empty">--</span>
+  }
+
+  return pieces.map((piece, index) => (
+    <span key={`${piece}-${index}`} className="capture-piece">
+      {CAPTURE_SYMBOLS[pieceColor][piece]}
+    </span>
+  ))
+}
+
 export default function PlayPage() {
   const navigate = useNavigate()
   const [state, dispatch] = useReducer(
@@ -93,14 +153,49 @@ export default function PlayPage() {
   const [detectedOpening, setDetectedOpening] = useState<Opening | null>(null)
   const [openingLoadError, setOpeningLoadError] = useState<string | null>(null)
   const [openingLookupStopped, setOpeningLookupStopped] = useState(false)
-  const [openingLookupAttempted, setOpeningLookupAttempted] = useState(false)
+  const [opponentElo, setOpponentElo] = useState(1600)
+  const [coachMode, setCoachMode] = useState(true)
+  const [blunderAlerts, setBlunderAlerts] = useState(true)
+  const [pgnInput, setPgnInput] = useState('')
+  const [pgnError, setPgnError] = useState<string | null>(null)
+  const [pgnMoveHistory, setPgnMoveHistory] = useState<PlayedMove[] | null>(null)
+  const [pgnFens, setPgnFens] = useState<string[] | null>(null)
+  const [pgnPlyIndex, setPgnPlyIndex] = useState(0)
+  const [isPgnAutoplay, setIsPgnAutoplay] = useState(false)
   const dragStateRef = useRef<DragState | null>(null)
   const suppressNextClickRef = useRef(false)
   const isGameOver = state.status === 'checkmate' || state.status === 'draw'
+  const { ready, evaluation, analyzeFen, toWhiteRatio, formatEvalValue } =
+    useStockfish()
 
-  const board = state.board
-  const moveRows = useMemo(() => buildMoveRows(state.moveHistory), [state.moveHistory])
-  const lastMoveIndex = state.moveHistory.length - 1
+  const isPgnMode = Boolean(pgnFens && pgnMoveHistory)
+  const activeFen = isPgnMode ? pgnFens![pgnPlyIndex] : state.fen
+  const activeTurn = (activeFen.split(' ')[1] as 'w' | 'b') || state.turn
+  const board = isPgnMode ? parseFEN(activeFen) : state.board
+  const activeHistory = isPgnMode
+    ? pgnMoveHistory!.slice(0, pgnPlyIndex)
+    : state.moveHistory
+  const hasPlayedMoves = activeHistory.length > 0
+  const moveRows = useMemo(() => buildMoveRows(activeHistory), [activeHistory])
+  const captures = useMemo(
+    () => buildCaptureSummary(activeHistory),
+    [activeHistory],
+  )
+  const lastMoveIndex = activeHistory.length - 1
+  const activeLastMove = hasPlayedMoves ? activeHistory[lastMoveIndex] : null
+  const maxPly = pgnMoveHistory?.length ?? 0
+  const canStepBackward = isPgnMode && pgnPlyIndex > 0
+  const canStepForward = isPgnMode && pgnPlyIndex < maxPly
+  const whiteRatio = toWhiteRatio(evaluation.cpWhite, evaluation.mateWhite)
+  const blackRatio = 1 - whiteRatio
+  const whiteEvalLabel = formatEvalValue(evaluation.cpWhite, evaluation.mateWhite)
+  const blackEvalLabel = formatEvalValue(
+    evaluation.cpWhite !== null ? -evaluation.cpWhite : null,
+    evaluation.mateWhite !== null ? -evaluation.mateWhite : null,
+  )
+  const principalVariation =
+    evaluation.pv.length > 0 ? evaluation.pv.slice(0, 7).join(' ') : '--'
+  const bestMoveText = evaluation.bestMove ?? '--'
   const opponentPrefix =
     state.status === 'checkmate'
       ? state.winner === 'b'
@@ -141,21 +236,41 @@ export default function PlayPage() {
   }, [])
 
   useEffect(() => {
-    if (!openings || !positionBook || openingLookupStopped) {
+    if (!openings || !positionBook || openingLookupStopped || !hasPlayedMoves) {
       return
     }
 
-    setOpeningLookupAttempted(true)
-    const opening = findOpening(openings, state.fen, positionBook)
+    const opening = findOpening(openings, activeFen, positionBook)
     if (opening) {
       setDetectedOpening(opening)
       return
     }
 
-    // Freeze further lookups on first miss.
-    // If we already had a known opening, keep displaying that as fallback.
+    // Freeze further lookups on first miss and keep last known opening.
     setOpeningLookupStopped(true)
-  }, [openings, positionBook, state.fen, openingLookupStopped])
+  }, [openings, positionBook, activeFen, openingLookupStopped, hasPlayedMoves])
+
+  useEffect(() => {
+    analyzeFen(activeFen, activeTurn)
+  }, [analyzeFen, activeFen, activeTurn])
+
+  useEffect(() => {
+    if (!isPgnAutoplay || !isPgnMode) {
+      return
+    }
+
+    const timer = window.setInterval(() => {
+      setPgnPlyIndex((current) => {
+        const next = Math.min(current + 1, maxPly)
+        if (next >= maxPly) {
+          setIsPgnAutoplay(false)
+        }
+        return next
+      })
+    }, 650)
+
+    return () => window.clearInterval(timer)
+  }, [isPgnAutoplay, isPgnMode, maxPly])
 
   useEffect(() => {
     dragStateRef.current = dragState
@@ -211,41 +326,115 @@ export default function PlayPage() {
     }
   }, [dragState])
 
+  const loadPgn = (rawPgn: string) => {
+    const normalized = rawPgn.trim()
+    if (!normalized) {
+      setPgnError('Paste or upload a PGN first.')
+      return
+    }
+
+    try {
+      const chess = new Chess()
+      chess.loadPgn(normalized)
+
+      const verbose = chess.history({ verbose: true })
+      const moves = buildPlayedMovesFromVerboseHistory(verbose)
+      const replay = new Chess()
+      const fens = [replay.fen()]
+      verbose.forEach((move) => {
+        replay.move({
+          from: move.from,
+          to: move.to,
+          promotion: move.promotion,
+        })
+        fens.push(replay.fen())
+      })
+
+      setPgnMoveHistory(moves)
+      setPgnFens(fens)
+      setPgnPlyIndex(moves.length)
+      setPgnError(null)
+      setIsPgnAutoplay(false)
+    } catch {
+      setPgnError('Invalid PGN format.')
+    }
+  }
+
+  const clearPgnMode = () => {
+    setPgnMoveHistory(null)
+    setPgnFens(null)
+    setPgnPlyIndex(0)
+    setPgnError(null)
+    setIsPgnAutoplay(false)
+  }
+
+  const handlePgnUpload = async (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0]
+    if (!file) {
+      return
+    }
+
+    try {
+      const text = await file.text()
+      setPgnInput(text)
+      loadPgn(text)
+    } catch {
+      setPgnError('Could not read PGN file.')
+    } finally {
+      event.target.value = ''
+    }
+  }
+
   return (
     <main className="page play-page">
       <section className="play-left">
         <div className="player-row">
           <div className="avatar" />
-          <div>
+          <div className="player-meta">
             <div className="player-name">{opponentPrefix}Opponent</div>
             <div className="player-sub">AI · Stockfish</div>
+          </div>
+          <div className="captures-row">
+            {renderCapturedPieces(captures.byColor.b, 'w')}
+            {captures.advantage.b > 0 ? (
+              <span className="captures-advantage">+{captures.advantage.b}</span>
+            ) : null}
           </div>
         </div>
 
         <div className="board-area">
           <aside className="eval-bar" aria-label="Evaluation bar">
-            <div className="eval-bar-black" />
-            <div className="eval-bar-white" />
-            <span className="eval-score eval-score-top">+0.0</span>
-            <span className="eval-score eval-score-bottom">0.0</span>
+            <div
+              className="eval-bar-black"
+              style={{ height: `${blackRatio * 100}%` }}
+            />
+            <div
+              className="eval-bar-white"
+              style={{ height: `${whiteRatio * 100}%` }}
+            />
+            <span className="eval-score eval-score-top">{blackEvalLabel}</span>
+            <span className="eval-score eval-score-bottom">{whiteEvalLabel}</span>
+            <span className="eval-ready-dot" aria-hidden="true">
+              {ready ? '●' : '○'}
+            </span>
           </aside>
 
           <div className="board-frame">
             <div className="board-grid">
               {squares.map((square) => {
-              const piece = board[square.row][square.col]
-              const currentSquare = squareAt(square.row, square.col)
-              const isSelected = state.selectedSquare === currentSquare
-              const isLegalMove = state.legalMoves.includes(currentSquare)
-              const isLastMove =
-                state.lastMove?.from === currentSquare ||
-                state.lastMove?.to === currentSquare
-              const isDropTarget = dragState?.hoverSquare === currentSquare
-              const isDraggingSource = dragState?.fromSquare === currentSquare
-              const isCheckedKing =
-                piece?.type === 'k' && piece.color === state.inCheckColor
-              const showRank = square.col === 0
-              const showFile = square.row === 7
+                const piece = board[square.row][square.col]
+                const currentSquare = squareAt(square.row, square.col)
+                const isSelected = state.selectedSquare === currentSquare
+                const isLegalMove = state.legalMoves.includes(currentSquare)
+                const isLastMove =
+                  activeLastMove?.from === currentSquare ||
+                  activeLastMove?.to === currentSquare
+                const isDropTarget = dragState?.hoverSquare === currentSquare
+                const isDraggingSource = dragState?.fromSquare === currentSquare
+                const isCheckedKing =
+                  piece?.type === 'k' && piece.color === state.inCheckColor
+                const showRank = square.col === 0
+                const showFile = square.row === 7
 
                 return (
                   <button
@@ -263,7 +452,12 @@ export default function PlayPage() {
                     type="button"
                     data-square={currentSquare}
                     onPointerDown={(event) => {
-                      if (isGameOver || !piece || piece.color !== state.turn) {
+                      if (
+                        isGameOver ||
+                        isPgnMode ||
+                        !piece ||
+                        piece.color !== state.turn
+                      ) {
                         return
                       }
 
@@ -286,7 +480,7 @@ export default function PlayPage() {
                         suppressNextClickRef.current = false
                         return
                       }
-                      if (isGameOver) {
+                      if (isGameOver || isPgnMode) {
                         return
                       }
 
@@ -329,19 +523,34 @@ export default function PlayPage() {
 
         <div className="player-row">
           <div className="avatar user" />
-          <div>
+          <div className="player-meta">
             <div className="player-name">{userPrefix}You</div>
             <div className="player-sub">Player</div>
+          </div>
+          <div className="captures-row">
+            {renderCapturedPieces(captures.byColor.w, 'b')}
+            {captures.advantage.w > 0 ? (
+              <span className="captures-advantage">+{captures.advantage.w}</span>
+            ) : null}
           </div>
         </div>
       </section>
 
       <aside className="play-right">
-        <header className="panel-header panel-span-2">
-          <h2>Play Chess</h2>
+        <header className="dashboard-top">
+          <h2 className="brand-title">ChessOS</h2>
+          <p className="brand-subtitle">Play, analyze, improve</p>
+          <div className="top-actions">
+            <button className="action-button" type="button">
+              Exit
+            </button>
+            <button className="action-button" type="button">
+              Copy PGN
+            </button>
+          </div>
         </header>
 
-        <div className="info-card move-list-card panel-left">
+        <div className="info-card move-list-card panel-moves">
           <div className="move-list-header">
             <h3>
               {openingLoadError
@@ -350,9 +559,7 @@ export default function PlayPage() {
                   ? 'Loading opening database...'
                   : detectedOpening
                     ? `${detectedOpening.name} (${detectedOpening.eco})`
-                    : openingLookupAttempted
-                      ? 'Opening not identified yet'
-                      : 'Detecting opening...'}
+                    : 'Opening'}
             </h3>
             <button
               className="opening-book-button"
@@ -365,7 +572,7 @@ export default function PlayPage() {
                 navigate(`/openings/${detectedOpening.eco}`, {
                   state: {
                     opening: detectedOpening,
-                    fen: state.fen,
+                    fen: activeFen,
                   },
                 })
               }}
@@ -375,10 +582,6 @@ export default function PlayPage() {
               📖
             </button>
           </div>
-
-          {detectedOpening ? (
-            <p className="opening-moves">{detectedOpening.moves}</p>
-          ) : null}
 
           <div className="moves-table" role="table" aria-label="Move list">
             {moveRows.length === 0 ? (
@@ -395,7 +598,7 @@ export default function PlayPage() {
                     }`}
                     role="cell"
                   >
-                    {row.white ? formatSanWithSymbols(row.white.san) : ''}
+                    {row.white ? renderSanWithEmphasizedSymbols(row.white.san) : ''}
                   </div>
                   <div
                     className={`move-cell${
@@ -403,7 +606,7 @@ export default function PlayPage() {
                     }`}
                     role="cell"
                   >
-                    {row.black ? formatSanWithSymbols(row.black.san) : ''}
+                    {row.black ? renderSanWithEmphasizedSymbols(row.black.san) : ''}
                   </div>
                 </div>
               ))
@@ -411,29 +614,160 @@ export default function PlayPage() {
           </div>
         </div>
 
-        <div className="info-card panel-right">
-          <h3>Bot Rating</h3>
-          <p>Selected difficulty and engine strength.</p>
+        <div className="info-card panel-pgn">
+          <div className="panel-pgn-header">
+            <h3>PGN</h3>
+            {isPgnMode ? (
+              <button
+                className="action-button action-button-subtle"
+                type="button"
+                onClick={clearPgnMode}
+              >
+                Exit Review
+              </button>
+            ) : null}
+          </div>
+          <label className="pgn-upload">
+            <span>Upload PGN File</span>
+            <input type="file" accept=".pgn,text/plain" onChange={handlePgnUpload} />
+          </label>
+          <textarea
+            className="pgn-textarea"
+            value={pgnInput}
+            onChange={(event) => setPgnInput(event.target.value)}
+            placeholder='Paste PGN here, e.g. 1. e4 e5 2. Nf3 Nc6'
+          />
+          <div className="pgn-actions">
+            <button
+              className="action-button action-button-primary"
+              type="button"
+              onClick={() => loadPgn(pgnInput)}
+            >
+              Load PGN
+            </button>
+            <button
+              className="action-button"
+              type="button"
+              onClick={() => {
+                setPgnInput('')
+                clearPgnMode()
+              }}
+            >
+              Clear
+            </button>
+          </div>
+          {pgnError ? <p className="pgn-error">{pgnError}</p> : null}
         </div>
-        <div className="info-card panel-right">
-          <h3>Live ELO</h3>
-          <p>Estimated rating based on current play.</p>
+
+        <div className="info-card panel-engine">
+          <h3>Engine</h3>
+          <p>Evaluation: {whiteEvalLabel}</p>
+          <p>Depth: {evaluation.depth ?? '--'}</p>
+          <p>Best move: {bestMoveText}</p>
+          <p className="pv-line">PV: {principalVariation}</p>
         </div>
-        <div className="info-card panel-right">
-          <h3>Analysis</h3>
-          <p>Stockfish evaluation and best lines.</p>
+
+        <div className="info-card panel-strength">
+          <h3>Opponent Strength</h3>
+          <input
+            className="elo-slider"
+            type="range"
+            min="800"
+            max="2800"
+            value={opponentElo}
+            step="50"
+            onChange={(event) => setOpponentElo(Number(event.target.value))}
+          />
+          <p>ELO: {opponentElo}</p>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={coachMode}
+              onChange={(event) => setCoachMode(event.target.checked)}
+            />
+            Coach hints
+          </label>
+          <label className="toggle-row">
+            <input
+              type="checkbox"
+              checked={blunderAlerts}
+              onChange={(event) => setBlunderAlerts(event.target.checked)}
+            />
+            Blunder alerts
+          </label>
         </div>
-        <div className="info-card panel-right">
-          <h3>Game Plan</h3>
-          <p>Use opening ideas and keep pieces active toward the center.</p>
+
+        <div className="action-row panel-actions">
+          <div className="move-nav">
+            <button
+              className="arrow-button"
+              type="button"
+              disabled={!isPgnMode || pgnPlyIndex <= 0}
+              onClick={() => {
+                setIsPgnAutoplay(false)
+                setPgnPlyIndex(0)
+              }}
+              title="Start"
+            >
+              |&lt;
+            </button>
+            <button
+              className="arrow-button"
+              type="button"
+              disabled={!canStepBackward}
+              onClick={() => {
+                setIsPgnAutoplay(false)
+                setPgnPlyIndex((current) => Math.max(0, current - 1))
+              }}
+              title="Previous"
+            >
+              &lt;
+            </button>
+            <button
+              className="arrow-button"
+              type="button"
+              disabled={!isPgnMode || maxPly <= 0}
+              onClick={() => setIsPgnAutoplay((current) => !current)}
+              title={isPgnAutoplay ? 'Pause' : 'Play'}
+            >
+              {isPgnAutoplay ? '⏸' : '▶'}
+            </button>
+            <button
+              className="arrow-button"
+              type="button"
+              disabled={!canStepForward}
+              onClick={() => {
+                setIsPgnAutoplay(false)
+                setPgnPlyIndex((current) => Math.min(maxPly, current + 1))
+              }}
+              title="Next"
+            >
+              &gt;
+            </button>
+            <button
+              className="arrow-button"
+              type="button"
+              disabled={!isPgnMode || pgnPlyIndex >= maxPly}
+              onClick={() => {
+                setIsPgnAutoplay(false)
+                setPgnPlyIndex(maxPly)
+              }}
+              title="End"
+            >
+              &gt;|
+            </button>
+          </div>
+          <button
+            className="action-button action-button-primary"
+            type="button"
+            onClick={() => {
+              clearPgnMode()
+              dispatch({ type: 'RESET' })
+            }}
+          >
+            Replay
+          </button>
         </div>
-        <button
-          className="primary replay-button panel-span-2"
-          type="button"
-          onClick={() => dispatch({ type: 'RESET' })}
-        >
-          Replay
-        </button>
       </aside>
     </main>
   )
