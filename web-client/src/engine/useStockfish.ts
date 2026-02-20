@@ -6,6 +6,7 @@ type EngineInfo = {
   cp: number | null
   mate: number | null
   pv: string[]
+  multipv: number
 }
 
 export type StockfishEvaluation = {
@@ -14,6 +15,7 @@ export type StockfishEvaluation = {
   mateWhite: number | null
   pv: string[]
   bestMove: string | null
+  secondBestMove: string | null
 }
 
 function clamp(value: number, min: number, max: number): number {
@@ -59,6 +61,7 @@ function parseInfo(line: string): EngineInfo | null {
   }
 
   const depthMatch = line.match(/\bdepth\s+(\d+)/)
+  const multiPvMatch = line.match(/\bmultipv\s+(\d+)/)
   const cpMatch = line.match(/\bscore\s+cp\s+(-?\d+)/)
   const mateMatch = line.match(/\bscore\s+mate\s+(-?\d+)/)
   const pvMatch = line.match(/\bpv\s+(.+)$/)
@@ -68,6 +71,7 @@ function parseInfo(line: string): EngineInfo | null {
     cp: cpMatch ? Number(cpMatch[1]) : null,
     mate: mateMatch ? Number(mateMatch[1]) : null,
     pv: pvMatch ? pvMatch[1].trim().split(/\s+/) : [],
+    multipv: multiPvMatch ? Number(multiPvMatch[1]) : 1,
   }
 }
 
@@ -79,8 +83,10 @@ export function useStockfish() {
     cp: null,
     mate: null,
     pv: [],
+    multipv: 1,
   })
   const [bestMove, setBestMove] = useState<string | null>(null)
+  const [secondBestMove, setSecondBestMove] = useState<string | null>(null)
   const [currentTurn, setCurrentTurn] = useState<Color>('w')
 
   useEffect(() => {
@@ -111,13 +117,22 @@ export function useStockfish() {
 
       const info = parseInfo(line)
       if (info) {
-        setEngineInfo(info)
+        if (info.multipv === 1) {
+          setEngineInfo(info)
+          setBestMove(info.pv[0] ?? null)
+          return
+        }
+
+        if (info.multipv === 2) {
+          setSecondBestMove(info.pv[0] ?? null)
+        }
       }
     }
 
     worker.postMessage('uci')
     worker.postMessage('setoption name Threads value 1')
     worker.postMessage('setoption name Hash value 16')
+    worker.postMessage('setoption name MultiPV value 2')
     worker.postMessage('ucinewgame')
     worker.postMessage('isready')
 
@@ -135,6 +150,8 @@ export function useStockfish() {
     }
 
     setCurrentTurn(turn)
+    setBestMove(null)
+    setSecondBestMove(null)
     worker.postMessage('stop')
     worker.postMessage(`position fen ${fen}`)
     worker.postMessage(`go movetime ${movetime}`)
@@ -160,8 +177,9 @@ export function useStockfish() {
       mateWhite,
       pv: engineInfo.pv,
       bestMove,
+      secondBestMove,
     }
-  }, [bestMove, currentTurn, engineInfo])
+  }, [bestMove, currentTurn, engineInfo, secondBestMove])
 
   return {
     ready,
