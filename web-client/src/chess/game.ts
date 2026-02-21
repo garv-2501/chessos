@@ -37,6 +37,12 @@ export type GameAction =
   | { type: 'CLICK_SQUARE'; square: string }
   | { type: 'SELECT_SQUARE'; square: string }
   | { type: 'MOVE_SELECTED_TO'; square: string }
+  | {
+      type: 'APPLY_UCI_MOVE'
+      from: string
+      to: string
+      promotion?: 'q' | 'r' | 'b' | 'n'
+    }
   | { type: 'CLEAR_SELECTION' }
   | { type: 'RESET' }
 
@@ -148,16 +154,21 @@ function selectSquare(state: GameState, square: string): GameState {
   }
 }
 
-function moveSelectedTo(state: GameState, toSquare: string): GameState {
-  if (isGameLocked(state) || !state.selectedSquare) {
+function applyMove(
+  state: GameState,
+  fromSquare: string,
+  toSquare: string,
+  promotion: 'q' | 'r' | 'b' | 'n' = 'q',
+): GameState {
+  if (isGameLocked(state)) {
     return state
   }
 
   const chess = new Chess(state.fen)
   const move = chess.move({
-    from: state.selectedSquare as Square,
+    from: fromSquare as Square,
     to: toSquare as Square,
-    promotion: 'q',
+    promotion,
   }) as Move | null
 
   if (!move) {
@@ -196,6 +207,14 @@ function moveSelectedTo(state: GameState, toSquare: string): GameState {
   }
 }
 
+function moveSelectedTo(state: GameState, toSquare: string): GameState {
+  if (!state.selectedSquare) {
+    return state
+  }
+
+  return applyMove(state, state.selectedSquare, toSquare, 'q')
+}
+
 export function createInitialGameState(): GameState {
   const chess = new Chess()
   const fen = chess.fen()
@@ -229,6 +248,14 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
   }
   if (action.type === 'MOVE_SELECTED_TO') {
     return moveSelectedTo(state, action.square)
+  }
+  if (action.type === 'APPLY_UCI_MOVE') {
+    return applyMove(
+      state,
+      action.from,
+      action.to,
+      action.promotion ?? 'q',
+    )
   }
 
   const clickedSquare = action.square

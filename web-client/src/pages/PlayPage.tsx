@@ -27,6 +27,7 @@ import {
 } from '../chess/game'
 import { buildCaptureSummary } from '../chess/captures'
 import { useStockfish } from '../engine/useStockfish'
+import { useStockfishBot } from '../engine/useStockfishBot'
 import type { Piece } from '../chess/types'
 import type { PieceType } from '../chess/types'
 import { parseFEN } from '../chess/fen'
@@ -643,7 +644,7 @@ export default function PlayPage() {
   const [detectedOpening, setDetectedOpening] = useState<Opening | null>(null)
   const [openingLoadError, setOpeningLoadError] = useState<string | null>(null)
   const [openingLookupStopped, setOpeningLookupStopped] = useState(false)
-  const [opponentElo, setOpponentElo] = useState(1600)
+  const [stockfishLevel, setStockfishLevel] = useState(10)
   const [showBestMoveArrow, setShowBestMoveArrow] = useState(true)
   const [showSecondBestArrow, setShowSecondBestArrow] = useState(true)
   const [showOpponentArrows, setShowOpponentArrows] = useState(false)
@@ -667,9 +668,12 @@ export default function PlayPage() {
   const analysisSessionRef = useRef(0)
   const analysisResultCacheRef = useRef<Record<string, AnalysisResult>>({})
   const suppressNextClickRef = useRef(false)
+  const [isBotThinking, setIsBotThinking] = useState(false)
   const isGameOver = state.status === 'checkmate' || state.status === 'draw'
-  const { ready, evaluation, analyzeFen, toWhiteRatio, formatEvalValue } =
+  const { ready: analysisReady, evaluation, analyzeFen, toWhiteRatio, formatEvalValue } =
     useStockfish()
+  const { ready: botReady, getBestMove, stop: stopBot } =
+    useStockfishBot(stockfishLevel)
 
   const isPgnMode = Boolean(pgnFens && pgnMoveHistory)
   const isPgnAnalysisMode = isPgnMode && Boolean(analysisResult)
@@ -690,6 +694,8 @@ export default function PlayPage() {
   const maxPly = pgnMoveHistory?.length ?? 0
   const canStepBackward = isPgnMode && pgnPlyIndex > 0
   const canStepForward = isPgnMode && pgnPlyIndex < maxPly
+  const isUserTurn = !isPgnMode && !isGameOver && state.turn === 'w'
+  const isBotTurn = !isPgnMode && !isGameOver && state.turn === 'b'
   const whiteRatio = toWhiteRatio(evaluation.cpWhite, evaluation.mateWhite)
   const blackRatio = 1 - whiteRatio
   const whiteEvalLabel = formatEvalValue(evaluation.cpWhite, evaluation.mateWhite)
@@ -900,6 +906,48 @@ export default function PlayPage() {
   }, [analyzeFen, activeFen, activeTurn])
 
   useEffect(() => {
+    if (!isBotTurn || !botReady) {
+      return
+    }
+
+    let cancelled = false
+
+    const playBotMove = async () => {
+      setIsBotThinking(true)
+      const bestMove = await getBestMove(state.fen)
+
+      if (cancelled) {
+        return
+      }
+
+      setIsBotThinking(false)
+
+      if (!bestMove) {
+        return
+      }
+
+      const move = uciToMoveObject(bestMove)
+      if (!move) {
+        return
+      }
+
+      dispatch({
+        type: 'APPLY_UCI_MOVE',
+        from: move.from,
+        to: move.to,
+        promotion: move.promotion as 'q' | 'r' | 'b' | 'n' | undefined,
+      })
+    }
+
+    void playBotMove()
+
+    return () => {
+      cancelled = true
+      stopBot()
+    }
+  }, [botReady, getBestMove, isBotTurn, state.fen, stopBot])
+
+  useEffect(() => {
     if (!isPgnAutoplay || !isPgnMode) {
       return
     }
@@ -1093,7 +1141,10 @@ export default function PlayPage() {
           <div className="avatar" />
           <div className="player-meta">
             <div className="player-name">{opponentPrefix}Opponent</div>
-            <div className="player-sub">AI · Stockfish</div>
+            <div className="player-sub">
+              AI · Stockfish Level {stockfishLevel}
+              {isBotThinking ? ' · Thinking...' : ''}
+            </div>
           </div>
           <div className="captures-row">
             {renderCapturedPieces(captures.byColor.b, 'w')}
@@ -1116,7 +1167,7 @@ export default function PlayPage() {
             <span className="eval-score eval-score-top">{blackEvalLabel}</span>
             <span className="eval-score eval-score-bottom">{whiteEvalLabel}</span>
             <span className="eval-ready-dot" aria-hidden="true">
-              {ready ? '●' : '○'}
+              {analysisReady ? '●' : '○'}
             </span>
           </aside>
 
@@ -1157,6 +1208,7 @@ export default function PlayPage() {
                       if (
                         isGameOver ||
                         isPgnMode ||
+                        !isUserTurn ||
                         !piece ||
                         piece.color !== state.turn
                       ) {
@@ -1182,7 +1234,7 @@ export default function PlayPage() {
                         suppressNextClickRef.current = false
                         return
                       }
-                      if (isGameOver || isPgnMode) {
+                      if (isGameOver || isPgnMode || !isUserTurn) {
                         return
                       }
 
@@ -1523,13 +1575,13 @@ export default function PlayPage() {
               <input
                 className="elo-slider"
                 type="range"
-                min="800"
-                max="2800"
-                value={opponentElo}
-                step="50"
-                onChange={(event) => setOpponentElo(Number(event.target.value))}
+                min="0"
+                max="20"
+                value={stockfishLevel}
+                step="1"
+                onChange={(event) => setStockfishLevel(Number(event.target.value))}
               />
-              <p>ELO: {opponentElo}</p>
+              <p>Level: {stockfishLevel}/20</p>
               <label className="toggle-row">
                 <input
                   type="checkbox"
