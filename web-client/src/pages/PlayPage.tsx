@@ -1,4 +1,5 @@
 import {
+  useCallback,
   useEffect,
   useMemo,
   useReducer,
@@ -34,6 +35,8 @@ import { parseFEN } from '../chess/fen'
 
 const fileLabels = ['a', 'b', 'c', 'd', 'e', 'f', 'g', 'h']
 const rankLabels = ['8', '7', '6', '5', '4', '3', '2', '1']
+const MIN_BOT_ELO = 800
+const MAX_BOT_ELO = 2800
 
 const SAN_SYMBOLS: Record<string, string> = {
   K: '♔',
@@ -272,6 +275,27 @@ function parsePromotionFromSan(san: string): 'q' | 'r' | 'b' | 'n' | undefined {
   }
 
   return match[1].toLowerCase() as 'q' | 'r' | 'b' | 'n'
+}
+
+function buildFenTimelineFromMoves(history: PlayedMove[]): string[] {
+  const chess = new Chess()
+  const fens = [chess.fen()]
+
+  for (const move of history) {
+    const result = chess.move({
+      from: move.from,
+      to: move.to,
+      promotion: parsePromotionFromSan(move.san),
+    })
+
+    if (!result) {
+      break
+    }
+
+    fens.push(chess.fen())
+  }
+
+  return fens
 }
 
 function getFenBeforeLastMove(history: PlayedMove[]): string | null {
@@ -644,7 +668,7 @@ export default function PlayPage() {
   const [detectedOpening, setDetectedOpening] = useState<Opening | null>(null)
   const [openingLoadError, setOpeningLoadError] = useState<string | null>(null)
   const [openingLookupStopped, setOpeningLookupStopped] = useState(false)
-  const [stockfishLevel, setStockfishLevel] = useState(10)
+  const [stockfishElo, setStockfishElo] = useState(1600)
   const [showBestMoveArrow, setShowBestMoveArrow] = useState(true)
   const [showSecondBestArrow, setShowSecondBestArrow] = useState(true)
   const [showOpponentArrows, setShowOpponentArrows] = useState(false)
@@ -662,6 +686,7 @@ export default function PlayPage() {
   const [isAnalyzingPgn, setIsAnalyzingPgn] = useState(false)
   const [pgnPlyIndex, setPgnPlyIndex] = useState(0)
   const [isPgnAutoplay, setIsPgnAutoplay] = useState(false)
+  const [livePlyIndex, setLivePlyIndex] = useState<number | null>(null)
   const dragStateRef = useRef<DragState | null>(null)
   const analysisCacheRef: MutableRefObject<Record<string, CachedPositionAnalysis>> =
     useRef({})
@@ -669,20 +694,40 @@ export default function PlayPage() {
   const analysisResultCacheRef = useRef<Record<string, AnalysisResult>>({})
   const suppressNextClickRef = useRef(false)
   const [isBotThinking, setIsBotThinking] = useState(false)
-  const isGameOver = state.status === 'checkmate' || state.status === 'draw'
   const { ready: analysisReady, evaluation, analyzeFen, toWhiteRatio, formatEvalValue } =
     useStockfish()
   const { ready: botReady, getBestMove, stop: stopBot } =
-    useStockfishBot(stockfishLevel)
+    useStockfishBot(stockfishElo)
 
   const isPgnMode = Boolean(pgnFens && pgnMoveHistory)
   const isPgnAnalysisMode = isPgnMode && Boolean(analysisResult)
-  const activeFen = isPgnMode ? pgnFens![pgnPlyIndex] : state.fen
-  const activeTurn = (activeFen.split(' ')[1] as 'w' | 'b') || state.turn
-  const board = isPgnMode ? parseFEN(activeFen) : state.board
+  const liveFens = useMemo(
+    () => buildFenTimelineFromMoves(state.moveHistory),
+    [state.moveHistory],
+  )
+  const liveMaxPly = liveFens.length - 1
+  const currentLivePlyIndex =
+    livePlyIndex === null ? liveMaxPly : Math.max(0, Math.min(livePlyIndex, liveMaxPly))
+  const isLiveReviewMode = !isPgnMode && livePlyIndex !== null
+  const activePlyIndex = isPgnMode ? pgnPlyIndex : currentLivePlyIndex
+  const activeFen = isPgnMode
+    ? pgnFens![pgnPlyIndex]
+    : liveFens[currentLivePlyIndex] ?? state.fen
+  const activePositionMeta = useMemo(() => {
+    const chess = new Chess(activeFen)
+    const turn = chess.turn() as 'w' | 'b'
+    return {
+      turn,
+      isGameOver: chess.isCheckmate() || chess.isDraw(),
+      inCheckColor: chess.isCheck() ? turn : null,
+    }
+  }, [activeFen])
+  const activeTurn = activePositionMeta.turn
+  const isActiveGameOver = activePositionMeta.isGameOver
+  const board = parseFEN(activeFen)
   const activeHistory = isPgnMode
     ? pgnMoveHistory!.slice(0, pgnPlyIndex)
-    : state.moveHistory
+    : state.moveHistory.slice(0, currentLivePlyIndex)
   const hasPlayedMoves = activeHistory.length > 0
   const moveRows = useMemo(() => buildMoveRows(activeHistory), [activeHistory])
   const captures = useMemo(
@@ -691,11 +736,13 @@ export default function PlayPage() {
   )
   const lastMoveIndex = activeHistory.length - 1
   const activeLastMove = hasPlayedMoves ? activeHistory[lastMoveIndex] : null
-  const maxPly = pgnMoveHistory?.length ?? 0
-  const canStepBackward = isPgnMode && pgnPlyIndex > 0
-  const canStepForward = isPgnMode && pgnPlyIndex < maxPly
-  const isUserTurn = !isPgnMode && !isGameOver && state.turn === 'w'
-  const isBotTurn = !isPgnMode && !isGameOver && state.turn === 'b'
+  const pgnMaxPly = pgnMoveHistory?.length ?? 0
+  const navigationMaxPly = isPgnMode ? pgnMaxPly : liveMaxPly
+  const canStepBackward = activePlyIndex > 0
+  const canStepForward = activePlyIndex < navigationMaxPly
+  const isUserTurn = !isPgnMode && !isActiveGameOver && activeTurn === 'w'
+  const isBotTurn =
+    !isPgnMode && !isLiveReviewMode && !isActiveGameOver && state.turn === 'b'
   const whiteRatio = toWhiteRatio(evaluation.cpWhite, evaluation.mateWhite)
   const blackRatio = 1 - whiteRatio
   const whiteEvalLabel = formatEvalValue(evaluation.cpWhite, evaluation.mateWhite)
@@ -707,7 +754,6 @@ export default function PlayPage() {
     () => formatPrincipalVariationForDisplay(activeFen, evaluation.pv),
     [activeFen, evaluation.pv],
   )
-  const bestMoveText = evaluation.bestMove ?? '--'
   const secondBestMoveText = evaluation.secondBestMove ?? '--'
   const bestMoveArrow = useMemo(
     () => (evaluation.bestMove ? uciToArrowEndpoints(evaluation.bestMove) : null),
@@ -859,6 +905,18 @@ export default function PlayPage() {
         ? 'Winner - '
         : 'Lost - '
       : ''
+  const branchFromReviewIfNeeded = useCallback(() => {
+    if (isPgnMode || !isLiveReviewMode) {
+      return
+    }
+
+    dispatch({
+      type: 'SET_POSITION',
+      fen: activeFen,
+      moveHistory: activeHistory,
+    })
+    setLivePlyIndex(null)
+  }, [activeFen, activeHistory, isLiveReviewMode, isPgnMode])
 
   useEffect(() => {
     let active = true
@@ -944,6 +1002,7 @@ export default function PlayPage() {
     return () => {
       cancelled = true
       stopBot()
+      setIsBotThinking(false)
     }
   }, [botReady, getBestMove, isBotTurn, state.fen, stopBot])
 
@@ -954,8 +1013,8 @@ export default function PlayPage() {
 
     const timer = window.setInterval(() => {
       setPgnPlyIndex((current) => {
-        const next = Math.min(current + 1, maxPly)
-        if (next >= maxPly) {
+        const next = Math.min(current + 1, pgnMaxPly)
+        if (next >= pgnMaxPly) {
           setIsPgnAutoplay(false)
         }
         return next
@@ -963,7 +1022,23 @@ export default function PlayPage() {
     }, 650)
 
     return () => window.clearInterval(timer)
-  }, [isPgnAutoplay, isPgnMode, maxPly])
+  }, [isPgnAutoplay, isPgnMode, pgnMaxPly])
+
+  useEffect(() => {
+    if (isPgnMode) {
+      return
+    }
+
+    setLivePlyIndex((current) => {
+      if (current === null) {
+        return null
+      }
+      if (current >= liveMaxPly) {
+        return null
+      }
+      return current
+    })
+  }, [isPgnMode, liveMaxPly])
 
   useEffect(() => {
     dragStateRef.current = dragState
@@ -1116,6 +1191,11 @@ export default function PlayPage() {
     setAnalysisResult(null)
   }
 
+  const goToLivePosition = () => {
+    setIsPgnAutoplay(false)
+    setLivePlyIndex(null)
+  }
+
   const handlePgnUpload = async (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0]
     if (!file) {
@@ -1142,7 +1222,7 @@ export default function PlayPage() {
           <div className="player-meta">
             <div className="player-name">{opponentPrefix}Opponent</div>
             <div className="player-sub">
-              AI · Stockfish Level {stockfishLevel}
+              AI · Stockfish ~{stockfishElo} Elo
               {isBotThinking ? ' · Thinking...' : ''}
             </div>
           </div>
@@ -1184,7 +1264,7 @@ export default function PlayPage() {
                 const isDropTarget = dragState?.hoverSquare === currentSquare
                 const isDraggingSource = dragState?.fromSquare === currentSquare
                 const isCheckedKing =
-                  piece?.type === 'k' && piece.color === state.inCheckColor
+                  piece?.type === 'k' && piece.color === activePositionMeta.inCheckColor
                 const isLastMoveTo = activeLastMove?.to === currentSquare
                 const showRank = square.col === 0
                 const showFile = square.row === 7
@@ -1206,15 +1286,16 @@ export default function PlayPage() {
                     data-square={currentSquare}
                     onPointerDown={(event) => {
                       if (
-                        isGameOver ||
+                        isActiveGameOver ||
                         isPgnMode ||
                         !isUserTurn ||
                         !piece ||
-                        piece.color !== state.turn
+                        piece.color !== activeTurn
                       ) {
                         return
                       }
 
+                      branchFromReviewIfNeeded()
                       event.preventDefault()
                       dispatch({ type: 'SELECT_SQUARE', square: currentSquare })
 
@@ -1226,7 +1307,7 @@ export default function PlayPage() {
                         pointerY: event.clientY,
                         hoverSquare: currentSquare,
                         cellSize: rect.width,
-                        legalMoves: getLegalMovesForSquare(state.fen, currentSquare),
+                        legalMoves: getLegalMovesForSquare(activeFen, currentSquare),
                       })
                     }}
                     onClick={() => {
@@ -1234,10 +1315,11 @@ export default function PlayPage() {
                         suppressNextClickRef.current = false
                         return
                       }
-                      if (isGameOver || isPgnMode || !isUserTurn) {
+                      if (isActiveGameOver || isPgnMode || !isUserTurn) {
                         return
                       }
 
+                      branchFromReviewIfNeeded()
                       dispatch({ type: 'CLICK_SQUARE', square: currentSquare })
                     }}
                   >
@@ -1500,14 +1582,9 @@ export default function PlayPage() {
               </div>
 
               <div className="insights-strip">
-                <span className="insight-pill">Best: {bestMoveText}</span>
                 {showSecondBestArrow ? (
                   <span className="insight-pill">2nd: {secondBestMoveText}</span>
                 ) : null}
-                {showMoveRankInsight && moveRankBadge ? (
-                  <span className="insight-pill">Rank: {moveRankBadge.label}</span>
-                ) : null}
-                <span className="insight-pill">Eval: {whiteEvalLabel}</span>
                 {showPvInsight ? (
                   <span className="insight-pill insight-pill-wide">
                     Principal Variation: {principalVariationDisplay}
@@ -1575,13 +1652,13 @@ export default function PlayPage() {
               <input
                 className="elo-slider"
                 type="range"
-                min="0"
-                max="20"
-                value={stockfishLevel}
-                step="1"
-                onChange={(event) => setStockfishLevel(Number(event.target.value))}
+                min={MIN_BOT_ELO}
+                max={MAX_BOT_ELO}
+                value={stockfishElo}
+                step="50"
+                onChange={(event) => setStockfishElo(Number(event.target.value))}
               />
-              <p>Level: {stockfishLevel}/20</p>
+              <p>Estimated Elo: {stockfishElo}</p>
               <label className="toggle-row">
                 <input
                   type="checkbox"
@@ -1631,10 +1708,14 @@ export default function PlayPage() {
             <button
               className="arrow-button"
               type="button"
-              disabled={!isPgnMode || pgnPlyIndex <= 0}
+              disabled={activePlyIndex <= 0}
               onClick={() => {
                 setIsPgnAutoplay(false)
-                setPgnPlyIndex(0)
+                if (isPgnMode) {
+                  setPgnPlyIndex(0)
+                  return
+                }
+                setLivePlyIndex(0)
               }}
               title="Start"
             >
@@ -1646,7 +1727,14 @@ export default function PlayPage() {
               disabled={!canStepBackward}
               onClick={() => {
                 setIsPgnAutoplay(false)
-                setPgnPlyIndex((current) => Math.max(0, current - 1))
+                if (isPgnMode) {
+                  setPgnPlyIndex((current) => Math.max(0, current - 1))
+                  return
+                }
+                setLivePlyIndex((current) => {
+                  const base = current === null ? liveMaxPly : current
+                  return Math.max(0, base - 1)
+                })
               }}
               title="Previous"
             >
@@ -1655,7 +1743,7 @@ export default function PlayPage() {
             <button
               className="arrow-button"
               type="button"
-              disabled={!isPgnMode || maxPly <= 0}
+              disabled={!isPgnMode || pgnMaxPly <= 0}
               onClick={() => setIsPgnAutoplay((current) => !current)}
               title={isPgnAutoplay ? 'Pause' : 'Play'}
             >
@@ -1667,7 +1755,15 @@ export default function PlayPage() {
               disabled={!canStepForward}
               onClick={() => {
                 setIsPgnAutoplay(false)
-                setPgnPlyIndex((current) => Math.min(maxPly, current + 1))
+                if (isPgnMode) {
+                  setPgnPlyIndex((current) => Math.min(pgnMaxPly, current + 1))
+                  return
+                }
+                setLivePlyIndex((current) => {
+                  const base = current === null ? liveMaxPly : current
+                  const next = Math.min(liveMaxPly, base + 1)
+                  return next >= liveMaxPly ? null : next
+                })
               }}
               title="Next"
             >
@@ -1676,21 +1772,31 @@ export default function PlayPage() {
             <button
               className="arrow-button"
               type="button"
-              disabled={!isPgnMode || pgnPlyIndex >= maxPly}
+              disabled={activePlyIndex >= navigationMaxPly}
               onClick={() => {
                 setIsPgnAutoplay(false)
-                setPgnPlyIndex(maxPly)
+                if (isPgnMode) {
+                  setPgnPlyIndex(pgnMaxPly)
+                  return
+                }
+                setLivePlyIndex(null)
               }}
               title="End"
             >
               &gt;|
             </button>
           </div>
+          {!isPgnMode && isLiveReviewMode ? (
+            <button className="action-button" type="button" onClick={goToLivePosition}>
+              Back to Live
+            </button>
+          ) : null}
           <button
             className="action-button action-button-primary"
             type="button"
             onClick={() => {
               clearPgnMode()
+              setLivePlyIndex(null)
               dispatch({ type: 'RESET' })
             }}
           >

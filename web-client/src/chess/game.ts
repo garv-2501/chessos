@@ -38,6 +38,11 @@ export type GameAction =
   | { type: 'SELECT_SQUARE'; square: string }
   | { type: 'MOVE_SELECTED_TO'; square: string }
   | {
+      type: 'SET_POSITION'
+      fen: string
+      moveHistory: PlayedMove[]
+    }
+  | {
       type: 'APPLY_UCI_MOVE'
       from: string
       to: string
@@ -215,6 +220,32 @@ function moveSelectedTo(state: GameState, toSquare: string): GameState {
   return applyMove(state, state.selectedSquare, toSquare, 'q')
 }
 
+function setPosition(state: GameState, fen: string, moveHistory: PlayedMove[]): GameState {
+  try {
+    const chess = new Chess(fen)
+    const position = evaluatePosition(chess)
+    const last = moveHistory[moveHistory.length - 1] ?? null
+
+    return {
+      ...state,
+      board: parseFEN(fen),
+      fen,
+      turn: position.turn,
+      selectedSquare: null,
+      legalMoves: [],
+      lastMove: last ? { from: last.from, to: last.to } : null,
+      lastMoveMeta: null,
+      status: position.status,
+      winner: position.winner,
+      loser: position.loser,
+      inCheckColor: position.inCheckColor,
+      moveHistory: [...moveHistory],
+    }
+  } catch {
+    return state
+  }
+}
+
 export function createInitialGameState(): GameState {
   const chess = new Chess()
   const fen = chess.fen()
@@ -248,6 +279,9 @@ export function gameReducer(state: GameState, action: GameAction): GameState {
   }
   if (action.type === 'MOVE_SELECTED_TO') {
     return moveSelectedTo(state, action.square)
+  }
+  if (action.type === 'SET_POSITION') {
+    return setPosition(state, action.fen, action.moveHistory)
   }
   if (action.type === 'APPLY_UCI_MOVE') {
     return applyMove(

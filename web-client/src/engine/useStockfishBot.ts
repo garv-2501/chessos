@@ -2,22 +2,33 @@ import { useCallback, useEffect, useRef, useState } from 'react'
 
 type BotMoveResolver = (move: string | null) => void
 
-function clampLevel(level: number): number {
-  return Math.max(0, Math.min(20, Math.round(level)))
+function clampElo(elo: number): number {
+  return Math.max(800, Math.min(2800, Math.round(elo)))
 }
 
-export function useStockfishBot(skillLevel: number) {
+function eloToSkillLevel(elo: number): number {
+  const clamped = clampElo(elo)
+  const normalized = (clamped - 800) / (2800 - 800)
+  return Math.max(0, Math.min(20, Math.round(normalized * 20)))
+}
+
+export function useStockfishBot(estimatedElo: number) {
   const workerRef = useRef<Worker | null>(null)
   const pendingMoveRef = useRef<BotMoveResolver | null>(null)
   const [ready, setReady] = useState(false)
 
-  const setSkillLevel = useCallback((level: number) => {
+  const setEstimatedElo = useCallback((elo: number) => {
     const worker = workerRef.current
     if (!worker) {
       return
     }
 
-    worker.postMessage(`setoption name Skill Level value ${clampLevel(level)}`)
+    const clampedElo = clampElo(elo)
+    worker.postMessage('setoption name UCI_LimitStrength value true')
+    worker.postMessage(`setoption name UCI_Elo value ${clampedElo}`)
+    worker.postMessage(
+      `setoption name Skill Level value ${eloToSkillLevel(clampedElo)}`,
+    )
   }, [])
 
   useEffect(() => {
@@ -67,8 +78,8 @@ export function useStockfishBot(skillLevel: number) {
       return
     }
 
-    setSkillLevel(skillLevel)
-  }, [ready, setSkillLevel, skillLevel])
+    setEstimatedElo(estimatedElo)
+  }, [estimatedElo, ready, setEstimatedElo])
 
   const stop = useCallback(() => {
     const worker = workerRef.current
@@ -105,7 +116,7 @@ export function useStockfishBot(skillLevel: number) {
 
   return {
     ready,
-    setSkillLevel,
+    setEstimatedElo,
     getBestMove,
     stop,
   }
